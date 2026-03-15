@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -28,7 +29,6 @@ import (
 	"github.com/penny-vault/pvbt/portfolio"
 	"github.com/penny-vault/pvbt/tradecron"
 	"github.com/penny-vault/pvbt/universe"
-	"github.com/rs/zerolog"
 )
 
 //go:embed README.md
@@ -37,10 +37,6 @@ var description string
 // MomentumDrivenEarningsPrediction selects stocks ranked by Zacks Investment
 // Research earnings predictions. It includes a momentum-based crash protection
 // that exits to a safe-haven asset when market sentiment goes negative.
-//
-// BLOCKED: This strategy requires pvbt to expose a ZacksRank metric (or
-// equivalent) so that the strategy can filter a broad universe to only
-// stocks with Zacks rank == 1. See the Compute method for details.
 type MomentumDrivenEarningsPrediction struct {
 	NumHoldings int               `pvbt:"num-holdings" desc:"Maximum number of stocks to hold" default:"50"`
 	Indicator   string            `pvbt:"indicator" desc:"Risk-on/off indicator: None or Momentum" default:"None"`
@@ -84,8 +80,6 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 		return true, nil
 	}
 
-	log := zerolog.Ctx(ctx)
-
 	vfinx := e.Asset("VFINX")
 	pridx := e.Asset("PRIDX")
 	dgs3mo := e.Asset("DGS3MO")
@@ -95,14 +89,12 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 
 	priceDF, err := indicatorUniverse.Window(ctx, portfolio.Months(6), data.MetricClose)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to fetch indicator prices")
-		return false, err
+		return false, fmt.Errorf("fetch indicator prices: %w", err)
 	}
 
 	riskFreeDF, err := riskFreeUniverse.Window(ctx, portfolio.Months(6), data.MetricClose)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to fetch risk-free rate")
-		return false, err
+		return false, fmt.Errorf("fetch risk-free rate: %w", err)
 	}
 
 	prices := priceDF.Downsample(data.Monthly).Last()
@@ -113,12 +105,9 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 	}
 
 	// Compute risk-adjusted momentum for 1, 3, 6 month periods.
-	rfCol := riskFree.Column(dgs3mo, data.MetricClose)
-
 	riskAdjMom := func(n int) *data.DataFrame {
 		mom := prices.Pct(n).MulScalar(100)
 		rfSum := riskFree.Rolling(n).Sum().DivScalar(12)
-		_ = rfCol // used via rfSum
 		return mom.Apply(func(col []float64) []float64 {
 			out := make([]float64, len(col))
 			rfSumCol := rfSum.Column(dgs3mo, data.MetricClose)
@@ -152,79 +141,53 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 	return maxScore > 0, nil
 }
 
-func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engine.Engine, p portfolio.Portfolio) {
-	log := zerolog.Ctx(ctx)
-
+func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engine.Engine, p portfolio.Portfolio) error {
 	// Step 1: Check risk indicator.
 	isRiskOn, err := s.riskOn(ctx, e)
 	if err != nil {
-		return
+		return fmt.Errorf("risk indicator: %w", err)
 	}
 
 	// Step 2: If risk-off, shift entirely to out-of-market ticker.
 	if !isRiskOn {
 		outDF, err := s.OutTicker.At(ctx, e.CurrentDate(), data.MetricClose)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to fetch out-ticker data")
-			return
+			return fmt.Errorf("fetch out-ticker: %w", err)
 		}
 
 		outAssets := outDF.AssetList()
 		if len(outAssets) == 0 {
-			return
+			return nil
 		}
 
 		alloc := portfolio.Allocation{
-			Date:    e.CurrentDate(),
-			Members: map[asset.Asset]float64{outAssets[0]: 1.0},
+			Date:          e.CurrentDate(),
+			Members:       map[asset.Asset]float64{outAssets[0]: 1.0},
+			Justification: "risk-off: momentum indicator negative",
 		}
-		if err := p.RebalanceTo(ctx, alloc); err != nil {
-			log.Error().Err(err).Msg("rebalance to out-ticker failed")
-		}
-		return
+		return p.RebalanceTo(ctx, alloc)
 	}
 
-	// Step 3: Select stocks with Zacks rank == 1, sorted by market cap.
-	//
-	// PVBT TEAM: This step requires a way to query rated/ranked stocks.
-	// The legacy implementation queried:
-	//   SELECT composite_figi FROM zacks_financials
-	//   WHERE zacks_rank=1 AND event_date=$1
-	//   ORDER BY market_cap_mil DESC LIMIT $2
-	//
-	// Possible pvbt approaches:
-	//   a) Add a ZacksRank metric to data.Metric and expose it through
-	//      the PVDataProvider so strategies can fetch it as a metric.
-	//   b) Add a RankedUniverse that accepts a rating source and threshold,
-	//      returning time-varying membership based on ranking data.
-	//   c) Expose a generic query interface for the ratings table.
-	//
-	// Once available, the code below would become:
-	//   rankedDF, err := zacksUniverse.At(ctx, e.CurrentDate(), data.MarketCap)
-	//   // sort by MarketCap descending, take top NumHoldings
-	//   // equal-weight and rebalance
+	// Step 3: Get Zacks rank 1 stocks using rated universe.
+	zacksUniverse := e.RatedUniverse("zacks-rank", data.RatingEq(1))
 
-	log.Error().Msg("MDEP: Zacks rank data not yet available in pvbt -- " +
-		"pvbt needs a ZacksRank metric or ranked universe provider")
+	// Step 4: Fetch market cap for these stocks at the current date.
+	mcDF, err := zacksUniverse.At(ctx, e.CurrentDate(), data.MarketCap)
+	if err != nil {
+		return fmt.Errorf("fetch market caps: %w", err)
+	}
 
-	// Placeholder: when Zacks data becomes available, select and rebalance.
-	// selectAndRebalance(ctx, e, p, s.NumHoldings)
-}
-
-// selectAndRebalance selects the top-N stocks by market cap from a set of
-// ranked assets and rebalances to an equal-weight allocation.
-// This is ready to use once the ranked asset list is available.
-func selectAndRebalance(ctx context.Context, p portfolio.Portfolio, date time.Time, assets []asset.Asset, marketCaps *data.DataFrame, numHoldings int) error {
+	// Step 5: Sort by market cap descending, take top N.
 	type assetCap struct {
 		Asset     asset.Asset
 		MarketCap float64
 	}
 
-	ranked := make([]assetCap, 0, len(assets))
-	for _, a := range assets {
-		cap := marketCaps.Value(a, data.MarketCap)
-		if !math.IsNaN(cap) {
-			ranked = append(ranked, assetCap{Asset: a, MarketCap: cap})
+	var ranked []assetCap
+	for _, a := range mcDF.AssetList() {
+		mc := mcDF.Value(a, data.MarketCap)
+		if !math.IsNaN(mc) && mc > 0 {
+			ranked = append(ranked, assetCap{Asset: a, MarketCap: mc})
 		}
 	}
 
@@ -232,22 +195,40 @@ func selectAndRebalance(ctx context.Context, p portfolio.Portfolio, date time.Ti
 		return ranked[i].MarketCap > ranked[j].MarketCap
 	})
 
-	if len(ranked) > numHoldings {
-		ranked = ranked[:numHoldings]
+	if len(ranked) > s.NumHoldings {
+		ranked = ranked[:s.NumHoldings]
 	}
 
 	if len(ranked) == 0 {
-		return nil
+		// No qualifying stocks, go to out-of-market.
+		outDF, err := s.OutTicker.At(ctx, e.CurrentDate(), data.MetricClose)
+		if err != nil {
+			return fmt.Errorf("fetch out-ticker fallback: %w", err)
+		}
+		outAssets := outDF.AssetList()
+		if len(outAssets) == 0 {
+			return nil
+		}
+		alloc := portfolio.Allocation{
+			Date:          e.CurrentDate(),
+			Members:       map[asset.Asset]float64{outAssets[0]: 1.0},
+			Justification: "no qualifying Zacks rank 1 stocks",
+		}
+		return p.RebalanceTo(ctx, alloc)
 	}
 
+	// Step 6: Equal weight and rebalance.
 	weight := 1.0 / float64(len(ranked))
 	members := make(map[asset.Asset]float64, len(ranked))
 	for _, r := range ranked {
 		members[r.Asset] = weight
 	}
 
-	return p.RebalanceTo(ctx, portfolio.Allocation{
-		Date:    date,
-		Members: members,
-	})
+	justification := fmt.Sprintf("risk-on: %d Zacks rank 1 stocks by market cap", len(ranked))
+	alloc := portfolio.Allocation{
+		Date:          e.CurrentDate(),
+		Members:       members,
+		Justification: justification,
+	}
+	return p.RebalanceTo(ctx, alloc)
 }
