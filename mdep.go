@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"math"
 	"sort"
 	"time"
@@ -14,6 +15,9 @@ import (
 	"github.com/penny-vault/pvbt/universe"
 	"github.com/rs/zerolog"
 )
+
+//go:embed README.md
+var description string
 
 // MomentumDrivenEarningsPrediction selects stocks ranked by Zacks Investment
 // Research earnings predictions. It includes a momentum-based crash protection
@@ -50,7 +54,7 @@ func (s *MomentumDrivenEarningsPrediction) Setup(e *engine.Engine) {
 func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription {
 	return engine.StrategyDescription{
 		ShortCode:   "mdep",
-		Description: "Invests in stocks ranked by earnings predictions from Zacks Investment Research with crash protection.",
+		Description: description,
 		Source:      "",
 		Version:     "1.0.0",
 		VersionDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC),
