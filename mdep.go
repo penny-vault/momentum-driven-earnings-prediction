@@ -75,9 +75,9 @@ func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription
 // riskOn returns true when the momentum-based risk indicator is positive.
 // It computes the average risk-adjusted momentum (1/3/6-month) of VFINX and
 // PRIDX and returns true if the max score across both is > 0.
-func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine.Engine) (bool, error) {
+func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine.Engine) (bool, float64, error) {
 	if s.Indicator != "Momentum" {
-		return true, nil
+		return true, math.NaN(), nil
 	}
 
 	vfinx := e.Asset("VFINX")
@@ -89,19 +89,19 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 
 	priceDF, err := indicatorUniverse.Window(ctx, portfolio.Months(6), data.MetricClose)
 	if err != nil {
-		return false, fmt.Errorf("fetch indicator prices: %w", err)
+		return false, math.NaN(), fmt.Errorf("fetch indicator prices: %w", err)
 	}
 
 	riskFreeDF, err := riskFreeUniverse.Window(ctx, portfolio.Months(6), data.MetricClose)
 	if err != nil {
-		return false, fmt.Errorf("fetch risk-free rate: %w", err)
+		return false, math.NaN(), fmt.Errorf("fetch risk-free rate: %w", err)
 	}
 
 	prices := priceDF.Downsample(data.Monthly).Last()
 	riskFree := riskFreeDF.Downsample(data.Monthly).Last()
 
 	if prices.Len() < 7 {
-		return true, nil
+		return true, math.NaN(), nil
 	}
 
 	// Compute risk-adjusted momentum for 1, 3, 6 month periods.
@@ -126,7 +126,7 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 	score = score.Drop(math.NaN()).Last()
 
 	if score.Len() == 0 {
-		return true, nil
+		return true, math.NaN(), nil
 	}
 
 	// Max score across indicator assets determines risk-on/off.
@@ -138,14 +138,17 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 		}
 	}
 
-	return maxScore > 0, nil
+	return maxScore > 0, maxScore, nil
 }
 
 func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engine.Engine, p portfolio.Portfolio) error {
 	// Step 1: Check risk indicator.
-	isRiskOn, err := s.riskOn(ctx, e)
+	isRiskOn, riskScore, err := s.riskOn(ctx, e)
 	if err != nil {
 		return fmt.Errorf("risk indicator: %w", err)
+	}
+	if !math.IsNaN(riskScore) {
+		p.Annotate(e.CurrentDate().Unix(), "risk-score", fmt.Sprintf("%.4f", riskScore))
 	}
 
 	// Step 2: If risk-off, shift entirely to out-of-market ticker.
