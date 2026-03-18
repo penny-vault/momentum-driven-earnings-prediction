@@ -48,18 +48,19 @@ func (s *MomentumDrivenEarningsPrediction) Name() string {
 	return "Momentum Driven Earnings Prediction"
 }
 
-func (s *MomentumDrivenEarningsPrediction) Setup(e *engine.Engine) {
+func (s *MomentumDrivenEarningsPrediction) Setup(eng *engine.Engine) {
 	schedule := "@weekend"
 	if s.Period == "Monthly" {
 		schedule = "@monthend"
 	}
+
 	tc, err := tradecron.New(schedule, tradecron.MarketHours{Open: 930, Close: 1600})
 	if err != nil {
 		panic(err)
 	}
-	e.Schedule(tc)
-	e.SetBenchmark(e.Asset("VFINX"))
-	e.RiskFreeAsset(e.Asset("DGS3MO"))
+
+	eng.Schedule(tc)
+	eng.SetBenchmark(eng.Asset("VFINX"))
 }
 
 func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription {
@@ -75,17 +76,17 @@ func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription
 // riskOn returns true when the momentum-based risk indicator is positive.
 // It computes the average risk-adjusted momentum (1/3/6-month) of VFINX and
 // PRIDX and returns true if the max score across both is > 0.
-func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine.Engine) (bool, float64, error) {
+func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, eng *engine.Engine) (bool, float64, error) {
 	if s.Indicator != "Momentum" {
 		return true, math.NaN(), nil
 	}
 
-	vfinx := e.Asset("VFINX")
-	pridx := e.Asset("PRIDX")
-	dgs3mo := e.Asset("DGS3MO")
+	vfinx := eng.Asset("VFINX")
+	pridx := eng.Asset("PRIDX")
+	dgs3mo := eng.Asset("DGS3MO")
 
-	indicatorUniverse := e.Universe(vfinx, pridx)
-	riskFreeUniverse := e.Universe(dgs3mo)
+	indicatorUniverse := eng.Universe(vfinx, pridx)
+	riskFreeUniverse := eng.Universe(dgs3mo)
 
 	priceDF, err := indicatorUniverse.Window(ctx, portfolio.Months(6), data.MetricClose)
 	if err != nil {
@@ -105,15 +106,18 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 	}
 
 	// Compute risk-adjusted momentum for 1, 3, 6 month periods.
-	riskAdjMom := func(n int) *data.DataFrame {
-		mom := prices.Pct(n).MulScalar(100)
-		rfSum := riskFree.Rolling(n).Sum().DivScalar(12)
+	riskAdjMom := func(months int) *data.DataFrame {
+		mom := prices.Pct(months).MulScalar(100)
+		rfSum := riskFree.Rolling(months).Sum().DivScalar(12)
+
 		return mom.Apply(func(col []float64) []float64 {
 			out := make([]float64, len(col))
+
 			rfSumCol := rfSum.Column(dgs3mo, data.MetricClose)
 			for i := range col {
 				out[i] = col[i] - rfSumCol[i]
 			}
+
 			return out
 		})
 	}
@@ -131,29 +135,31 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, e *engine
 
 	// Max score across indicator assets determines risk-on/off.
 	maxScore := math.Inf(-1)
-	for _, a := range score.AssetList() {
-		v := score.Value(a, data.MetricClose)
-		if v > maxScore {
-			maxScore = v
+
+	for _, scoreAsset := range score.AssetList() {
+		val := score.Value(scoreAsset, data.MetricClose)
+		if val > maxScore {
+			maxScore = val
 		}
 	}
 
 	return maxScore > 0, maxScore, nil
 }
 
-func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engine.Engine, p portfolio.Portfolio) error {
+func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio) error {
 	// Step 1: Check risk indicator.
-	isRiskOn, riskScore, err := s.riskOn(ctx, e)
+	isRiskOn, riskScore, err := s.riskOn(ctx, eng)
 	if err != nil {
 		return fmt.Errorf("risk indicator: %w", err)
 	}
+
 	if !math.IsNaN(riskScore) {
-		p.Annotate(e.CurrentDate().Unix(), "risk-score", fmt.Sprintf("%.4f", riskScore))
+		strategyPortfolio.Annotate(eng.CurrentDate().Unix(), "risk-score", fmt.Sprintf("%.4f", riskScore))
 	}
 
 	// Step 2: If risk-off, shift entirely to out-of-market ticker.
 	if !isRiskOn {
-		outDF, err := s.OutTicker.At(ctx, e.CurrentDate(), data.MetricClose)
+		outDF, err := s.OutTicker.At(ctx, eng.CurrentDate(), data.MetricClose)
 		if err != nil {
 			return fmt.Errorf("fetch out-ticker: %w", err)
 		}
@@ -164,18 +170,19 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engin
 		}
 
 		alloc := portfolio.Allocation{
-			Date:          e.CurrentDate(),
+			Date:          eng.CurrentDate(),
 			Members:       map[asset.Asset]float64{outAssets[0]: 1.0},
 			Justification: "risk-off: momentum indicator negative",
 		}
-		return p.RebalanceTo(ctx, alloc)
+
+		return strategyPortfolio.RebalanceTo(ctx, alloc)
 	}
 
 	// Step 3: Get Zacks rank 1 stocks using rated universe.
-	zacksUniverse := e.RatedUniverse("zacks-rank", data.RatingEq(1))
+	zacksUniverse := eng.RatedUniverse("zacks-rank", data.RatingEq(1))
 
 	// Step 4: Fetch market cap for these stocks at the current date.
-	mcDF, err := zacksUniverse.At(ctx, e.CurrentDate(), data.MarketCap)
+	mcDF, err := zacksUniverse.At(ctx, eng.CurrentDate(), data.MarketCap)
 	if err != nil {
 		return fmt.Errorf("fetch market caps: %w", err)
 	}
@@ -187,10 +194,11 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engin
 	}
 
 	var ranked []assetCap
-	for _, a := range mcDF.AssetList() {
-		mc := mcDF.Value(a, data.MarketCap)
+
+	for _, stock := range mcDF.AssetList() {
+		mc := mcDF.Value(stock, data.MarketCap)
 		if !math.IsNaN(mc) && mc > 0 {
-			ranked = append(ranked, assetCap{Asset: a, MarketCap: mc})
+			ranked = append(ranked, assetCap{Asset: stock, MarketCap: mc})
 		}
 	}
 
@@ -204,34 +212,39 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, e *engin
 
 	if len(ranked) == 0 {
 		// No qualifying stocks, go to out-of-market.
-		outDF, err := s.OutTicker.At(ctx, e.CurrentDate(), data.MetricClose)
+		outDF, err := s.OutTicker.At(ctx, eng.CurrentDate(), data.MetricClose)
 		if err != nil {
 			return fmt.Errorf("fetch out-ticker fallback: %w", err)
 		}
+
 		outAssets := outDF.AssetList()
 		if len(outAssets) == 0 {
 			return nil
 		}
+
 		alloc := portfolio.Allocation{
-			Date:          e.CurrentDate(),
+			Date:          eng.CurrentDate(),
 			Members:       map[asset.Asset]float64{outAssets[0]: 1.0},
 			Justification: "no qualifying Zacks rank 1 stocks",
 		}
-		return p.RebalanceTo(ctx, alloc)
+
+		return strategyPortfolio.RebalanceTo(ctx, alloc)
 	}
 
 	// Step 6: Equal weight and rebalance.
 	weight := 1.0 / float64(len(ranked))
 	members := make(map[asset.Asset]float64, len(ranked))
-	for _, r := range ranked {
-		members[r.Asset] = weight
+
+	for _, rc := range ranked {
+		members[rc.Asset] = weight
 	}
 
 	justification := fmt.Sprintf("risk-on: %d Zacks rank 1 stocks by market cap", len(ranked))
 	alloc := portfolio.Allocation{
-		Date:          e.CurrentDate(),
+		Date:          eng.CurrentDate(),
 		Members:       members,
 		Justification: justification,
 	}
-	return p.RebalanceTo(ctx, alloc)
+
+	return strategyPortfolio.RebalanceTo(ctx, alloc)
 }
