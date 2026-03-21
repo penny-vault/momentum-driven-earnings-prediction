@@ -27,7 +27,6 @@ import (
 	"github.com/penny-vault/pvbt/data"
 	"github.com/penny-vault/pvbt/engine"
 	"github.com/penny-vault/pvbt/portfolio"
-	"github.com/penny-vault/pvbt/tradecron"
 	"github.com/penny-vault/pvbt/universe"
 )
 
@@ -48,28 +47,22 @@ func (s *MomentumDrivenEarningsPrediction) Name() string {
 	return "Momentum Driven Earnings Prediction"
 }
 
-func (s *MomentumDrivenEarningsPrediction) Setup(eng *engine.Engine) {
+func (s *MomentumDrivenEarningsPrediction) Setup(_ *engine.Engine) {}
+
+func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription {
 	schedule := "@weekend"
 	if s.Period == "Monthly" {
 		schedule = "@monthend"
 	}
 
-	tc, err := tradecron.New(schedule, tradecron.MarketHours{Open: 930, Close: 1600})
-	if err != nil {
-		panic(err)
-	}
-
-	eng.Schedule(tc)
-	eng.SetBenchmark(eng.Asset("VFINX"))
-}
-
-func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription {
 	return engine.StrategyDescription{
 		ShortCode:   "mdep",
 		Description: description,
 		Source:      "",
 		Version:     "1.0.0",
 		VersionDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC),
+		Schedule:    schedule,
+		Benchmark:   "VFINX",
 	}
 }
 
@@ -146,7 +139,7 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, eng *engi
 	return maxScore > 0, maxScore, nil
 }
 
-func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio) error {
+func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *engine.Engine, strategyPortfolio portfolio.Portfolio, batch *portfolio.Batch) error {
 	// Step 1: Check risk indicator.
 	isRiskOn, riskScore, err := s.riskOn(ctx, eng)
 	if err != nil {
@@ -154,7 +147,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 	}
 
 	if !math.IsNaN(riskScore) {
-		strategyPortfolio.Annotate(eng.CurrentDate().Unix(), "risk-score", fmt.Sprintf("%.4f", riskScore))
+		batch.Annotate("risk-score", fmt.Sprintf("%.4f", riskScore))
 	}
 
 	// Step 2: If risk-off, shift entirely to out-of-market ticker.
@@ -175,7 +168,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 			Justification: "risk-off: momentum indicator negative",
 		}
 
-		return strategyPortfolio.RebalanceTo(ctx, alloc)
+		return batch.RebalanceTo(ctx, alloc)
 	}
 
 	// Step 3: Get Zacks rank 1 stocks using rated universe.
@@ -228,7 +221,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 			Justification: "no qualifying Zacks rank 1 stocks",
 		}
 
-		return strategyPortfolio.RebalanceTo(ctx, alloc)
+		return batch.RebalanceTo(ctx, alloc)
 	}
 
 	// Step 6: Equal weight and rebalance.
@@ -246,5 +239,5 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 		Justification: justification,
 	}
 
-	return strategyPortfolio.RebalanceTo(ctx, alloc)
+	return batch.RebalanceTo(ctx, alloc)
 }
