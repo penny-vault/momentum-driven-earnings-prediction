@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package mdep
 
 import (
 	"context"
@@ -152,7 +152,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 
 	// Step 2: If risk-off, shift entirely to out-of-market ticker.
 	if !isRiskOn {
-		outDF, err := s.OutTicker.At(ctx, eng.CurrentDate(), data.MetricClose)
+		outDF, err := s.OutTicker.At(ctx, data.MetricClose)
 		if err != nil {
 			return fmt.Errorf("fetch out-ticker: %w", err)
 		}
@@ -175,7 +175,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 	zacksUniverse := eng.RatedUniverse("zacks-rank", data.RatingEq(1))
 
 	// Step 4: Fetch market cap for these stocks at the current date.
-	mcDF, err := zacksUniverse.At(ctx, eng.CurrentDate(), data.MarketCap)
+	mcDF, err := zacksUniverse.At(ctx, data.MarketCap)
 	if err != nil {
 		return fmt.Errorf("fetch market caps: %w", err)
 	}
@@ -205,7 +205,7 @@ func (s *MomentumDrivenEarningsPrediction) Compute(ctx context.Context, eng *eng
 
 	if len(ranked) == 0 {
 		// No qualifying stocks, go to out-of-market.
-		outDF, err := s.OutTicker.At(ctx, eng.CurrentDate(), data.MetricClose)
+		outDF, err := s.OutTicker.At(ctx, data.MetricClose)
 		if err != nil {
 			return fmt.Errorf("fetch out-ticker fallback: %w", err)
 		}

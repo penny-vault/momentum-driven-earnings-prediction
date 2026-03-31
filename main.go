@@ -15,8 +15,11 @@
 
 package main
 
-import "github.com/penny-vault/pvbt/cli"
+import (
+	"github.com/penny-vault/momentum-driven-earnings-prediction/mdep"
+	"github.com/penny-vault/pvbt/cli"
+)
 
 func main() {
-	cli.Run(&MomentumDrivenEarningsPrediction{})
+	cli.Run(&mdep.MomentumDrivenEarningsPrediction{})
 }
