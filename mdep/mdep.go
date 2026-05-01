@@ -76,7 +76,7 @@ func (s *MomentumDrivenEarningsPrediction) riskOn(ctx context.Context, eng *engi
 
 	vfinx := eng.Asset("VFINX")
 	pridx := eng.Asset("PRIDX")
-	dgs3mo := eng.Asset("DGS3MO")
+	dgs3mo := eng.Asset("FRED:DGS3MO")
 
 	indicatorUniverse := eng.Universe(vfinx, pridx)
 	riskFreeUniverse := eng.Universe(dgs3mo)
