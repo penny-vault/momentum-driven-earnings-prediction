@@ -62,7 +62,7 @@ func (s *MomentumDrivenEarningsPrediction) Describe() engine.StrategyDescription
 		Version:     "1.0.0",
 		VersionDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC),
 		Schedule:    schedule,
-		Benchmark:   "VFINX",
+		Benchmark:   "SPY",
 	}
 }
 
